@@ -138,6 +138,30 @@ Both Gmail nodes read it via `{{ $('Config').first().json.recipient }}`, so noth
 needs touching. (To run several clients, duplicate the workflow and change that one field,
 or drive it from a list.)
 
+## Security — no secrets in this repo, bring your own credentials
+
+**This repository contains no secrets.** There are no API keys, tokens, or passwords in any
+file — not in `workflow.json`, not in the scripts, nowhere. To run it you supply your own:
+
+- **Gmail** → an *OAuth2* credential you create in n8n (browser consent).
+- **JSearch** → a free RapidAPI key stored in a *Header Auth* credential (`X-RapidAPI-Key`).
+- **Remotive / Jobicy** → no key needed.
+
+How secrets are kept out:
+
+- The workflow references credentials by **n8n's credential system**, never as text in a node.
+  (n8n's own rule: a token in a Set/HTTP field is a leak — so the RapidAPI key lives in a
+  Header Auth credential the node points at, and is never serialized into `workflow.json`.)
+- The helper scripts read the n8n endpoint/token from **environment variables**
+  (`N8N_MCP_URL`, `N8N_MCP_TOKEN`, `N8N_API_KEY`) — nothing is hardcoded.
+- **`.gitignore`** excludes `.tmp/` (run/debug data and instance IDs), `node_modules/`,
+  `.env*`, `credentials.json`, `token.json`, and key/cert files.
+- The email recipient and instance URL in these files are **placeholders**
+  (`you@example.com`, `YOUR-INSTANCE.app.n8n.cloud`) — set your own after import.
+
+If you fork this, keep that discipline: pass secrets via env vars or the n8n credential store,
+and never commit `.env`, `credentials.json`, or `token.json`.
+
 ## Development
 
 Node is required (tested with Node 18+). If `node` isn't on your PATH it lives at
@@ -201,3 +225,7 @@ step 4's checks should already be correct on n8n 2.28+; just confirm them if you
 older/newer major. (A full local *execute* wasn't possible — the n8n 2.28.5 **server** has
 an unrelated module-loading bug on Windows — but the transform itself is proven end-to-end
 by `scripts/test-workflow-code.js` running the exact Code-node body against the live APIs.)
+
+## License
+
+[MIT](LICENSE) — free to use, modify, and share. No warranty. Bring your own credentials.
