@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Temp / disposable run artifacts (scraped data, MCP call payloads, execution dumps).
+# These can contain instance IDs, credential IDs, and job data — never commit them.
+.tmp/
+
+# Secrets — never commit. All tokens/keys are passed via environment variables instead.
+.env
+.env.*
+credentials.json
+token.json
+*.pem
+*.key
+
+# Logs / OS cruft
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,584 @@
+{
+  "name": "Weekly AI Automation Part-Time Job Report",
+  "nodes": [
+    {
+      "id": "node-schedule",
+      "name": "Schedule (Mon & Thu 08:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        320
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1,
+                4
+              ],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        320
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "searchTerm",
+              "value": "automation",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "maxAgeDays",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "a3",
+              "name": "allowedTypes",
+              "value": "part_time,contract,freelance",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "requireKeyword",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "a5",
+              "name": "recipient",
+              "value": "you@example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-remotive",
+      "name": "Remotive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "url": "https://remotive.com/api/remote-jobs",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "search",
+              "value": "={{ $json.searchTerm }}"
+            },
+            {
+              "name": "limit",
+              "value": "50"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "node-jobicy",
+      "name": "Jobicy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        440
+      ],
+      "parameters": {
+        "url": "https://jobicy.com/api/v2/remote-jobs",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "count",
+              "value": "50"
+            },
+            {
+              "name": "tag",
+              "value": "={{ $json.searchTerm }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "node-jsearch",
+      "name": "JSearch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        620
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://jsearch.p.rapidapi.com/search-v2",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-RapidAPI-Host",
+              "value": "jsearch.p.rapidapi.com"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.searchTerm }}"
+            },
+            {
+              "name": "page",
+              "value": "1"
+            },
+            {
+              "name": "num_pages",
+              "value": "2"
+            },
+            {
+              "name": "employment_types",
+              "value": "PARTTIME,CONTRACTOR"
+            },
+            {
+              "name": "remote_jobs_only",
+              "value": "true"
+            },
+            {
+              "name": "date_posted",
+              "value": "month"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "node-merge",
+      "name": "Merge Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        640,
+        460
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 3
+      }
+    },
+    {
+      "id": "node-compile",
+      "name": "Compile Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * normalize-jobs.js — body of the n8n Code node \"Compile Jobs\".\n * Mode: \"Run Once for All Items\".\n *\n * n8n Code nodes cannot require() local files, so the pure transform below is\n * INLINED from src/normalize-core.js — keep the two in sync. The only n8n-specific\n * parts are the input readers (readApiArray / readConfig) and the return shape at\n * the bottom.\n *\n * Reads the upstream nodes: \"Config\" (Set), \"Remotive\" (HTTP), \"Jobicy\" (HTTP).\n * Returns one n8n item per matched job, or a single { empty: true } item when\n * nothing matched (so the \"no results\" email branch still fires — a node that\n * outputs zero items would stop the workflow before the email is sent).\n */\n\n// ===== BEGIN inlined core (mirror of src/normalize-core.js) =================\nconst DEFAULT_CONFIG = {\n  allowedTypes: ['part_time', 'contract', 'freelance'],\n  maxAgeDays: 30,\n  requireKeyword: true,\n  keywords: [\n    'automation', 'automate', 'rpa', 'zapier', 'n8n', 'make.com', 'workflow',\n    'integration', 'no-code', 'low-code', 'ai agent', 'artificial intelligence',\n    'machine learning', 'data annotation', 'data label',\n    'process automation', 'workflow automation', 'ai automation', 'agentic',\n    'chatbot', 'power automate', 'uipath',\n  ],\n  excludeTitleKeywords: [\n    'sales', 'account executive', 'account manager', 'business development',\n    'recruit', 'copywriter', 'content writer', 'sdr', 'bdr',\n  ],\n  // HARD block: clerical roles that sometimes carry \"automation\" in the title but are never\n  // AI-automation roles. Dropped even when the title mentions a keyword.\n  blockTitleKeywords: [\n    'secretary', 'receptionist', 'data entry', 'administrative assistant', 'office administrator',\n    'virtual assistant', 'appointment setter', 'telemarketer', 'call center', 'cold caller',\n    'customer service representative',\n  ],\n};\n\nfunction normJobType(raw) {\n  if (!raw) return '';\n  return String(raw).toLowerCase().trim().replace(/[\\s-]+/g, '_');\n}\n\nfunction toDate(value) {\n  if (value === null || value === undefined || value === '') return null;\n  if (typeof value === 'number' || /^\\d+$/.test(String(value))) {\n    const secs = Number(value);\n    const ms = secs > 1e12 ? secs : secs * 1000;\n    const d = new Date(ms);\n    return isNaN(d.getTime()) ? null : d;\n  }\n  const d = new Date(value);\n  return isNaN(d.getTime()) ? null : d;\n}\n\nfunction firstAllowedType(types, allowed) {\n  for (const t of types) {\n    if (allowed.includes(normJobType(t))) return normJobType(t);\n  }\n  return '';\n}\n\nfunction fromRemotive(jobs) {\n  return (jobs || []).map((j) => {\n    const tags = Array.isArray(j.tags) ? j.tags.join(', ') : '';\n    return {\n      source: 'Remotive',\n      title: j.title || '',\n      company: j.company_name || '',\n      _types: [j.job_type],\n      location: j.candidate_required_location || 'Remote',\n      salary: j.salary || '',\n      url: j.url || '',\n      _date: toDate(j.publication_date),\n      tags,\n      _hay: `${j.title || ''} ${tags} ${j.category || ''} ${j.description || ''}`,\n    };\n  });\n}\n\nfunction fromJobicy(jobs) {\n  return (jobs || []).map((j) => {\n    let salary = '';\n    if (j.salaryMin || j.salaryMax) {\n      const cur = j.salaryCurrency || '';\n      salary = `${cur} ${j.salaryMin || '?'}–${j.salaryMax || '?'}`.trim();\n    }\n    const tags = Array.isArray(j.jobIndustry) ? j.jobIndustry.join(', ') : '';\n    return {\n      source: 'Jobicy',\n      title: j.jobTitle || '',\n      company: j.companyName || '',\n      _types: Array.isArray(j.jobType) ? j.jobType : [j.jobType],\n      location: j.jobGeo || 'Remote',\n      salary,\n      url: j.url || '',\n      _date: toDate(j.pubDate),\n      tags,\n      _hay: `${j.jobTitle || ''} ${tags} ${j.jobExcerpt || ''} ${j.jobDescription || ''}`,\n    };\n  });\n}\n\nconst JSEARCH_TYPE = { FULLTIME: 'full_time', PARTTIME: 'part_time', CONTRACTOR: 'contract', INTERN: 'intern' };\n\nfunction fromJSearch(jobs) {\n  return (jobs || []).map((j) => {\n    let salary = '';\n    if (j.job_min_salary || j.job_max_salary) {\n      const cur = j.job_salary_currency || '';\n      const per = j.job_salary_period ? '/' + String(j.job_salary_period).toLowerCase() : '';\n      salary = `${cur} ${j.job_min_salary || '?'}–${j.job_max_salary || '?'}${per}`.trim();\n    }\n    const loc = j.job_is_remote ? 'Remote'\n      : [j.job_city, j.job_country].filter(Boolean).join(', ') || 'Remote';\n    return {\n      source: j.job_publisher || 'JSearch',\n      title: j.job_title || '',\n      company: j.employer_name || '',\n      _types: (Array.isArray(j.job_employment_types) && j.job_employment_types.length\n        ? j.job_employment_types\n        : [j.job_employment_type]).map((t) => JSEARCH_TYPE[t] || t),\n      location: loc,\n      salary,\n      url: j.job_apply_link || '',\n      _date: toDate(j.job_posted_at_datetime_utc),\n      tags: j.job_publisher || '',\n      _hay: `${j.job_title || ''} ${j.job_publisher || ''} ${j.job_description || ''}`,\n    };\n  });\n}\n\nfunction matchesKeyword(row, keywords) {\n  const hay = String(row._hay || `${row.title} ${row.tags}`).toLowerCase();\n  return keywords.some((k) => hay.includes(k.toLowerCase()));\n}\n\nfunction buildRows(mappedBySource, config) {\n  const cfg = Object.assign({}, DEFAULT_CONFIG, config || {});\n  const cutoff = cfg.maxAgeDays\n    ? Date.now() - cfg.maxAgeDays * 24 * 60 * 60 * 1000\n    : null;\n  const all = [].concat.apply([], Object.keys(mappedBySource).map((k) => mappedBySource[k]));\n  const seenUrl = new Set();\n  const seenTitle = new Set();\n  const out = [];\n  for (const row of all) {\n    const jobType = firstAllowedType(row._types || [], cfg.allowedTypes);\n    if (!jobType) continue;\n    if (cfg.requireKeyword && !matchesKeyword(row, cfg.keywords)) continue;\n    const titleLc = (row.title || '').toLowerCase();\n    if ((cfg.blockTitleKeywords || []).some((k) => titleLc.includes(k))) continue;\n    const titleExcluded = (cfg.excludeTitleKeywords || []).some((k) => titleLc.includes(k));\n    const titleOnTopic = cfg.keywords.some((k) => titleLc.includes(k.toLowerCase()));\n    if (titleExcluded && !titleOnTopic) continue;\n    if (cutoff && row._date && row._date.getTime() < cutoff) continue;\n    // dedupe by URL OR normalized title (JSearch cross-posts one role to several boards with\n    // different URLs and different employer strings, so collapse on title).\n    const urlKey = (row.url || '').toLowerCase().trim();\n    const titleKey = (row.title || '').toLowerCase().replace(/\\s+/g, ' ').trim();\n    if ((urlKey && seenUrl.has(urlKey)) || (titleKey && seenTitle.has(titleKey))) continue;\n    if (urlKey) seenUrl.add(urlKey);\n    if (titleKey) seenTitle.add(titleKey);\n    out.push({\n      source: row.source,\n      title: row.title,\n      company: row.company,\n      job_type: jobType,\n      location: row.location,\n      salary: row.salary,\n      posted_date: row._date ? row._date.toISOString().slice(0, 10) : '',\n      url: row.url,\n      tags: row.tags,\n      _ts: row._date ? row._date.getTime() : 0,\n    });\n  }\n  out.sort((a, b) => b._ts - a._ts);\n  return out.map((r) => { const c = Object.assign({}, r); delete c._ts; return c; });\n}\n// ===== END inlined core ====================================================\n\n// ----- n8n glue ------------------------------------------------------------\n\n/** Pull the array at `key` from an HTTP node's JSON body; [] if node failed/missing. */\nfunction readApiArray(nodeName, key) {\n  try {\n    const items = $(nodeName).all();\n    if (!items.length) return [];\n    const body = items[0].json || {};\n    return Array.isArray(body[key]) ? body[key] : [];\n  } catch (e) {\n    return [];\n  }\n}\n\n/**\n * JSearch's jobs array. /search-v2 nests them at `data.jobs` (data is an object);\n * the legacy /search returned `data` as the array directly. Handle both. [] on failure.\n */\nfunction readJSearchJobs() {\n  try {\n    const items = $('JSearch').all();\n    if (!items.length) return [];\n    const body = items[0].json || {};\n    const d = body.data;\n    if (Array.isArray(d)) return d;                 // legacy /search\n    if (d && Array.isArray(d.jobs)) return d.jobs;  // /search-v2\n    return [];\n  } catch (e) {\n    return [];\n  }\n}\n\n/** Read overrides from the \"Config\" Set node; falls back to code defaults. */\nfunction readConfig() {\n  let raw = {};\n  try { raw = $('Config').first().json || {}; } catch (e) { raw = {}; }\n  const cfg = {};\n  if (raw.maxAgeDays !== undefined && raw.maxAgeDays !== '') cfg.maxAgeDays = Number(raw.maxAgeDays);\n  if (raw.allowedTypes) cfg.allowedTypes = String(raw.allowedTypes).split(',').map((s) => s.trim()).filter(Boolean);\n  if (raw.requireKeyword !== undefined) cfg.requireKeyword = raw.requireKeyword === true || raw.requireKeyword === 'true';\n  return cfg;\n}\n\nconst remotiveJobs = readApiArray('Remotive', 'jobs');\nconst jobicyJobs = readApiArray('Jobicy', 'jobs');\nconst jsearchJobs = readJSearchJobs(); // [] when the node/credential is absent\n\nconst rows = buildRows(\n  {\n    remotive: fromRemotive(remotiveJobs),\n    jobicy: fromJobicy(jobicyJobs),\n    jsearch: fromJSearch(jsearchJobs),\n  },\n  readConfig(),\n);\n\nif (rows.length === 0) {\n  return [{ json: { empty: true, count: 0 } }];\n}\nreturn rows.map((r) => ({ json: r }));\n"
+      }
+    },
+    {
+      "id": "node-if",
+      "name": "Has Results?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        900,
+        320
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.empty }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-email-empty",
+      "name": "Email No Results",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1140,
+        200
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Config').first().json.recipient }}",
+        "subject": "=Weekly AI Automation Part-Time Jobs — {{ $now.toFormat('yyyy-LL-dd') }} (no matches)",
+        "emailType": "html",
+        "message": "=<h2>Weekly AI Automation — Part-Time Jobs</h2><p>No part-time / contract / freelance automation roles matched this week on Remotive, Jobicy or JSearch. I'll check again next Monday.</p>",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-xlsx",
+      "name": "To XLSX",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1140,
+        440
+      ],
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "fileName": "ai-automation-part-time-jobs.xlsx",
+          "sheetName": "Jobs"
+        }
+      }
+    },
+    {
+      "id": "node-email-report",
+      "name": "Email Report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1360,
+        440
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Config').first().json.recipient }}",
+        "subject": "=Weekly AI Automation Part-Time Jobs — {{ $now.toFormat('yyyy-LL-dd') }} ({{ $('Compile Jobs').all().length }} roles)",
+        "emailType": "html",
+        "message": "=<h2>Weekly AI Automation — Part-Time / Contract / Freelance</h2><p>{{ $('Compile Jobs').all().length }} matching remote role(s) this week (part-time, contract or freelance; automation / AI focus).</p><p>Full list attached as an Excel file. Top roles:</p><ul>{{ $('Compile Jobs').all().slice(0, 10).map(i => `<li><a href=\"${i.json.url}\">${i.json.title}</a> — ${i.json.company} <em>(${i.json.job_type}, ${i.json.location})</em></li>`).join('') }}</ul><p style=\"color:#888;font-size:12px\">Sources: Remotive, Jobicy + JSearch (Indeed / LinkedIn / Glassdoor / ZipRecruiter via Google for Jobs). Generated automatically by n8n.</p>",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "data"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-store-log",
+      "name": "Store in Log",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1360,
+        240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "AI Automation Jobs Log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "report_date": "={{ $now.toFormat('yyyy-LL-dd') }}",
+            "source": "={{ $json.source }}",
+            "title": "={{ $json.title }}",
+            "company": "={{ $json.company }}",
+            "job_type": "={{ $json.job_type }}",
+            "location": "={{ $json.location }}",
+            "salary": "={{ $json.salary }}",
+            "posted_date": "={{ $json.posted_date }}",
+            "url": "={{ $json.url }}",
+            "tags": "={{ $json.tags }}"
+          },
+          "schema": [
+            {
+              "id": "report_date",
+              "displayName": "report_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "job_type",
+              "displayName": "job_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "salary",
+              "displayName": "salary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "posted_date",
+              "displayName": "posted_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tags",
+              "displayName": "tags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "matchingColumns": []
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule (Mon & Thu 08:00)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Remotive",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Jobicy",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "JSearch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remotive": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jobicy": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "JSearch": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Sources": {
+      "main": [
+        [
+          {
+            "node": "Compile Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compile Jobs": {
+      "main": [
+        [
+          {
+            "node": "Has Results?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Results?": {
+      "main": [
+        [
+          {
+            "node": "Email No Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "To XLSX",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Store in Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To XLSX": {
+      "main": [
+        [
+          {
+            "node": "Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
