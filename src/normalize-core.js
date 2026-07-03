@@ -1,7 +1,7 @@
 /**
  * normalize-core.js — pure transform logic for the weekly job report.
  *
- * SINGLE SOURCE OF TRUTH for the mapping/filter/dedupe/sort. It is:
+ * SINGLE SOURCE OF TRUTH for the mapping/filter/dedupe/sort/scoring. It is:
  *   - required by src/test-normalize.js for the offline live-API test, and
  *   - copied verbatim (functions only) into the n8n Code node body,
  *     src/normalize-jobs.js, which adds the thin n8n glue at the bottom.
@@ -44,6 +44,14 @@ const DEFAULT_CONFIG = {
   ],
 };
 
+// Publishers/boards we treat as reputable for the trust score (matched case-insensitively
+// against the row's `source`, which for JSearch is the originating publisher).
+const REPUTABLE_BOARDS = [
+  'linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound', 'we work remotely',
+  'remotive', 'jobicy', 'dice', 'builtin', 'stack overflow', 'weworkremotely', 'greenhouse',
+  'lever', 'workday',
+];
+
 /** Canonicalize an employment-type label: "Part-Time" -> "part_time". */
 function normJobType(raw) {
   if (!raw) return '';
@@ -67,6 +75,37 @@ function toDate(value) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/** Strip HTML tags + decode the handful of entities the sources actually emit, collapse space. */
+function stripHtml(s) {
+  return String(s || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;|&rsquo;|&apos;/g, "'")
+    .replace(/&quot;|&ldquo;|&rdquo;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Clip to n chars on a word boundary with an ellipsis. */
+function clip(s, n) {
+  const str = String(s || '');
+  if (str.length <= n) return str;
+  return str.slice(0, n - 1).replace(/\s+\S*$/, '') + '…';
+}
+
+/** Normalize a company name for cross-source matching ("Acme, Inc." ~ "Acme LLC"). */
+function normCompany(c) {
+  return String(c || '')
+    .toLowerCase()
+    .replace(/[.,]/g, '')
+    .replace(/\b(inc|llc|ltd|gmbh|co|corp|limited|company)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function firstAllowedType(types, allowed) {
   for (const t of types) {
     if (allowed.includes(normJobType(t))) return normJobType(t);
@@ -76,7 +115,8 @@ function firstAllowedType(types, allowed) {
 
 // ---- Per-source mappers to the common schema -----------------------------
 // Common row: { source, title, company, job_type, location, salary, url,
-//               posted_date (ISO string|''), tags (string) }
+//               posted_date (ISO string|''), tags (string), description,
+//               company_website, company_logo, trust_score, trust_band, trust_reasons }
 
 function fromRemotive(jobs) {
   return (jobs || []).map((j) => {
@@ -91,6 +131,10 @@ function fromRemotive(jobs) {
       url: j.url || '',
       _date: toDate(j.publication_date),
       tags,
+      _desc: stripHtml(j.description),
+      _website: '',
+      _logo: j.company_logo || '',
+      _direct: false,
       _hay: `${j.title || ''} ${tags} ${j.category || ''} ${j.description || ''}`,
     };
   });
@@ -114,6 +158,10 @@ function fromJobicy(jobs) {
       url: j.url || '',
       _date: toDate(j.pubDate),
       tags,
+      _desc: stripHtml(j.jobDescription || j.jobExcerpt),
+      _website: j.url && j.companyName ? '' : '',
+      _logo: j.companyLogo || '',
+      _direct: false,
       _hay: `${j.jobTitle || ''} ${tags} ${j.jobExcerpt || ''} ${j.jobDescription || ''}`,
     };
   });
@@ -148,6 +196,11 @@ function fromJSearch(jobs) {
       url: j.job_apply_link || '',
       _date: toDate(j.job_posted_at_datetime_utc),
       tags: j.job_publisher || '',
+      _desc: stripHtml(j.job_description),
+      // Trust signals JSearch uniquely exposes about the employer.
+      _website: j.employer_website || '',
+      _logo: j.employer_logo || '',
+      _direct: j.job_apply_is_direct === true,
       _hay: `${j.job_title || ''} ${j.job_publisher || ''} ${j.job_description || ''}`,
     };
   });
@@ -160,8 +213,46 @@ function matchesKeyword(row, keywords) {
 }
 
 /**
+ * Legitimacy / Trust score (0–100) from signals we actually have — NOT a real
+ * employer rating (no free source provides those). Transparent: every point is
+ * tied to a reason string. Fair across sources — the website/logo/direct-apply
+ * bonuses only JSearch exposes are additive, never penalties, so Remotive/Jobicy
+ * rows still reach a high score via salary + recency + multi-board presence.
+ */
+function computeTrust(row, sourceCount) {
+  let score = 40; // baseline: it's on a curated aggregator at all
+  const reasons = [];
+
+  if (row.salary && String(row.salary).trim()) {
+    score += 20;
+    reasons.push('salary disclosed');
+  }
+  if (sourceCount >= 2) {
+    score += 15;
+    reasons.push(`cross-posted on ${sourceCount} boards`);
+  }
+  const days = row._date ? Math.floor((Date.now() - row._date.getTime()) / 86400000) : null;
+  if (days !== null) {
+    if (days <= 7) { score += 12; reasons.push('posted this week'); }
+    else if (days <= 14) { score += 8; reasons.push('posted recently'); }
+    else if (days <= 30) { score += 4; }
+  }
+  if (row._website) { score += 8; reasons.push('verified company website'); }
+  if (row._logo) { score += 3; }
+  if (row._direct) { score += 7; reasons.push('direct application'); }
+  if (REPUTABLE_BOARDS.some((p) => String(row.source).toLowerCase().includes(p))) {
+    score += 8;
+    reasons.push('reputable job board');
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  const band = score >= 80 ? 'High' : score >= 60 ? 'Good' : 'Basic';
+  return { score, band, reasons };
+}
+
+/**
  * Combine mapped rows from all sources, apply keyword + type + age filters,
- * dedupe, sort newest-first, and finalize the public shape.
+ * dedupe, score, sort, and finalize the public shape.
  */
 function buildRows(mappedBySource, config = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
@@ -170,6 +261,17 @@ function buildRows(mappedBySource, config = {}) {
     : null;
 
   const all = [].concat(...Object.values(mappedBySource));
+
+  // How many distinct sources/publishers each company appears on (computed BEFORE dedupe,
+  // since dedupe collapses the cross-posts we want to count). Feeds the trust score.
+  const companySources = new Map();
+  for (const row of all) {
+    const key = normCompany(row.company);
+    if (!key) continue;
+    if (!companySources.has(key)) companySources.set(key, new Set());
+    companySources.get(key).add(String(row.source).toLowerCase());
+  }
+
   const seenUrl = new Set();
   const seenTitle = new Set();
   const out = [];
@@ -203,6 +305,9 @@ function buildRows(mappedBySource, config = {}) {
     if (urlKey) seenUrl.add(urlKey);
     if (titleKey) seenTitle.add(titleKey);
 
+    const sourceCount = (companySources.get(normCompany(row.company)) || new Set()).size || 1;
+    const trust = computeTrust(row, sourceCount);
+
     out.push({
       source: row.source,
       title: row.title,
@@ -213,6 +318,16 @@ function buildRows(mappedBySource, config = {}) {
       posted_date: row._date ? row._date.toISOString().slice(0, 10) : '',
       url: row.url,
       tags: row.tags,
+      // Retained for descriptions + the LLM summary; raw fallback text if the LLM is skipped.
+      description: clip(row._desc || '', 400),
+      // A neutral one-liner derived from the fields we have; the LLM node overwrites this when present.
+      summary: '',
+      company_website: row._website || '',
+      company_logo: row._logo || '',
+      // Trust / legitimacy scoring (see computeTrust).
+      trust_score: trust.score,
+      trust_band: trust.band,
+      trust_reasons: trust.reasons.join('; '),
       _ts: row._date ? row._date.getTime() : 0,
     });
   }
@@ -225,9 +340,13 @@ module.exports = {
   DEFAULT_CONFIG,
   normJobType,
   toDate,
+  stripHtml,
+  clip,
+  normCompany,
   fromRemotive,
   fromJobicy,
   fromJSearch,
   matchesKeyword,
+  computeTrust,
   buildRows,
 };

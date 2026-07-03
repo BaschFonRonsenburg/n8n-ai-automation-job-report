@@ -7,10 +7,11 @@
  * parts are the input readers (readApiArray / readConfig) and the return shape at
  * the bottom.
  *
- * Reads the upstream nodes: "Config" (Set), "Remotive" (HTTP), "Jobicy" (HTTP).
- * Returns one n8n item per matched job, or a single { empty: true } item when
- * nothing matched (so the "no results" email branch still fires — a node that
- * outputs zero items would stop the workflow before the email is sent).
+ * Reads the upstream nodes: "Config" (Set), "Remotive" (HTTP), "Jobicy" (HTTP),
+ * "JSearch" (HTTP). Returns one n8n item per matched job (now carrying a cleaned
+ * `description`, an empty `summary` for the LLM node to fill, and a `trust_score`),
+ * or a single { empty: true } item when nothing matched (so the "no results" email
+ * branch still fires — a node that outputs zero items would stop the workflow).
  */
 
 // ===== BEGIN inlined core (mirror of src/normalize-core.js) =================
@@ -38,6 +39,12 @@ const DEFAULT_CONFIG = {
   ],
 };
 
+const REPUTABLE_BOARDS = [
+  'linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound', 'we work remotely',
+  'remotive', 'jobicy', 'dice', 'builtin', 'stack overflow', 'weworkremotely', 'greenhouse',
+  'lever', 'workday',
+];
+
 function normJobType(raw) {
   if (!raw) return '';
   return String(raw).toLowerCase().trim().replace(/[\s-]+/g, '_');
@@ -53,6 +60,34 @@ function toDate(value) {
   }
   const d = new Date(value);
   return isNaN(d.getTime()) ? null : d;
+}
+
+function stripHtml(s) {
+  return String(s || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;|&rsquo;|&apos;/g, "'")
+    .replace(/&quot;|&ldquo;|&rdquo;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function clip(s, n) {
+  const str = String(s || '');
+  if (str.length <= n) return str;
+  return str.slice(0, n - 1).replace(/\s+\S*$/, '') + '…';
+}
+
+function normCompany(c) {
+  return String(c || '')
+    .toLowerCase()
+    .replace(/[.,]/g, '')
+    .replace(/\b(inc|llc|ltd|gmbh|co|corp|limited|company)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function firstAllowedType(types, allowed) {
@@ -75,6 +110,10 @@ function fromRemotive(jobs) {
       url: j.url || '',
       _date: toDate(j.publication_date),
       tags,
+      _desc: stripHtml(j.description),
+      _website: '',
+      _logo: j.company_logo || '',
+      _direct: false,
       _hay: `${j.title || ''} ${tags} ${j.category || ''} ${j.description || ''}`,
     };
   });
@@ -98,6 +137,10 @@ function fromJobicy(jobs) {
       url: j.url || '',
       _date: toDate(j.pubDate),
       tags,
+      _desc: stripHtml(j.jobDescription || j.jobExcerpt),
+      _website: '',
+      _logo: j.companyLogo || '',
+      _direct: false,
       _hay: `${j.jobTitle || ''} ${tags} ${j.jobExcerpt || ''} ${j.jobDescription || ''}`,
     };
   });
@@ -127,6 +170,10 @@ function fromJSearch(jobs) {
       url: j.job_apply_link || '',
       _date: toDate(j.job_posted_at_datetime_utc),
       tags: j.job_publisher || '',
+      _desc: stripHtml(j.job_description),
+      _website: j.employer_website || '',
+      _logo: j.employer_logo || '',
+      _direct: j.job_apply_is_direct === true,
       _hay: `${j.job_title || ''} ${j.job_publisher || ''} ${j.job_description || ''}`,
     };
   });
@@ -137,12 +184,43 @@ function matchesKeyword(row, keywords) {
   return keywords.some((k) => hay.includes(k.toLowerCase()));
 }
 
+function computeTrust(row, sourceCount) {
+  let score = 40;
+  const reasons = [];
+  if (row.salary && String(row.salary).trim()) { score += 20; reasons.push('salary disclosed'); }
+  if (sourceCount >= 2) { score += 15; reasons.push(`cross-posted on ${sourceCount} boards`); }
+  const days = row._date ? Math.floor((Date.now() - row._date.getTime()) / 86400000) : null;
+  if (days !== null) {
+    if (days <= 7) { score += 12; reasons.push('posted this week'); }
+    else if (days <= 14) { score += 8; reasons.push('posted recently'); }
+    else if (days <= 30) { score += 4; }
+  }
+  if (row._website) { score += 8; reasons.push('verified company website'); }
+  if (row._logo) { score += 3; }
+  if (row._direct) { score += 7; reasons.push('direct application'); }
+  if (REPUTABLE_BOARDS.some((p) => String(row.source).toLowerCase().includes(p))) {
+    score += 8; reasons.push('reputable job board');
+  }
+  score = Math.max(0, Math.min(100, score));
+  const band = score >= 80 ? 'High' : score >= 60 ? 'Good' : 'Basic';
+  return { score, band, reasons };
+}
+
 function buildRows(mappedBySource, config) {
   const cfg = Object.assign({}, DEFAULT_CONFIG, config || {});
   const cutoff = cfg.maxAgeDays
     ? Date.now() - cfg.maxAgeDays * 24 * 60 * 60 * 1000
     : null;
   const all = [].concat.apply([], Object.keys(mappedBySource).map((k) => mappedBySource[k]));
+
+  const companySources = new Map();
+  for (const row of all) {
+    const key = normCompany(row.company);
+    if (!key) continue;
+    if (!companySources.has(key)) companySources.set(key, new Set());
+    companySources.get(key).add(String(row.source).toLowerCase());
+  }
+
   const seenUrl = new Set();
   const seenTitle = new Set();
   const out = [];
@@ -163,6 +241,10 @@ function buildRows(mappedBySource, config) {
     if ((urlKey && seenUrl.has(urlKey)) || (titleKey && seenTitle.has(titleKey))) continue;
     if (urlKey) seenUrl.add(urlKey);
     if (titleKey) seenTitle.add(titleKey);
+
+    const sourceCount = (companySources.get(normCompany(row.company)) || new Set()).size || 1;
+    const trust = computeTrust(row, sourceCount);
+
     out.push({
       source: row.source,
       title: row.title,
@@ -173,6 +255,13 @@ function buildRows(mappedBySource, config) {
       posted_date: row._date ? row._date.toISOString().slice(0, 10) : '',
       url: row.url,
       tags: row.tags,
+      description: clip(row._desc || '', 400),
+      summary: '',
+      company_website: row._website || '',
+      company_logo: row._logo || '',
+      trust_score: trust.score,
+      trust_band: trust.band,
+      trust_reasons: trust.reasons.join('; '),
       _ts: row._date ? row._date.getTime() : 0,
     });
   }

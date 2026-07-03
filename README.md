@@ -1,9 +1,11 @@
 # Weekly AI-Automation Part-Time Job Report (n8n)
 
 An n8n workflow that runs **twice a week (Mon & Thu mornings)**, pulls remote **AI / automation**
-job listings from free job APIs, keeps only **part-time / contract / freelance** roles,
-compiles them into an **Excel (.xlsx)** file, and **emails the report** to you (with a
-"no matches this week" email on quiet weeks).
+job listings from free job APIs, keeps only **part-time / contract / freelance** roles, scores each
+employer for **legitimacy (a 0–100 Trust score)**, writes a **one-line AI summary** of every role
+(Google Gemini, free tier), and **emails a designed HTML report** — with a **company Trust-score
+chart** and two attachments: a **styled spreadsheet** and the **chart as a PNG**. On quiet weeks it
+sends a "no matches this week" note instead.
 
 Built as a portfolio piece. To turn it into a client deliverable later, only the
 recipient email needs to change (see [Reuse for a client](#reuse-for-a-client)).
@@ -43,12 +45,20 @@ Schedule — Mon & Thu 08:00
             Merge Sources (append)            ← barrier: waits for ALL three to finish
                 │                                (without it the Code node fires on the
           Compile Jobs (Code)                    first arrival and can't see the others)
-                │                              ← normalize + filter part-time/contract/freelance
-          Has Results?  (IF)                     + automation keyword + dedupe + sort
+                │                              ← normalize + filter + dedupe + sort,
+          Has Results?  (IF)                     retain description + compute Trust score (0–100)
             ├── true (empty) ── Email No Results
-            └── false ──────── To XLSX ── Email Report (with .xlsx attached)
-                          └──── Store in Log (n8n Data Table)
+            └── false ─┬─ Prep Summaries ─ Gemini ─ Apply Summaries ─ Build Report ─ Email Report
+                       │   (batch 1 call)  (LLM)   (one-liner/row)   (chart+HTML+.xls)  (2 attachments)
+                       └─ Store in Log (n8n Data Table)
 ```
+
+**Build Report** produces the whole deliverable in one Code node: a QuickChart Trust-score image
+(embedded in the email *and* attached as `company-trust-chart.png`), the designed HTML email body,
+and a **styled Excel-compatible `.xls`** (title banner, summary, colored Trust column, clickable
+roles). The **Gemini** step is a single batched HTTP call per run (free tier) that summarizes every
+role at once; if it errors, each role falls back to a snippet of its own description, so the report
+never breaks.
 
 - **Sources:** [Remotive](https://remotive.com), [Jobicy](https://jobicy.com), and
   **[JSearch](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch)** (RapidAPI). Remotive
@@ -64,8 +74,16 @@ Schedule — Mon & Thu 08:00
   sources silently contribute nothing.
 - **Filter:** an employment type of `part_time`, `contract`, or `freelance`, **and** an
   automation/AI keyword somewhere in the title/tags/description, posted within 30 days.
-- **Output:** `ai-automation-part-time-jobs.xlsx` with columns
-  `source, title, company, job_type, location, salary, posted_date, url, tags`.
+- **Trust score (0–100):** a transparent legitimacy signal per employer — **not** an official
+  rating (no free source provides those). Points for salary disclosed, cross-posting across boards,
+  a verified company website/logo (JSearch), a direct-apply link, recency, and a reputable board.
+  Every point carries a reason string, surfaced in the email cards and the `.xls`.
+- **Summaries:** one factual sentence per role from **Google Gemini** (`gemini-2.0-flash`, free tier),
+  batched into a single call per run; falls back to a description snippet if the call fails.
+- **Output:** a designed HTML email plus two attachments — `ai-automation-jobs.xls` (styled:
+  banner, summary, trust-band legend, colored Trust column, clickable roles) and
+  `company-trust-chart.png` (the Trust-score bar chart). Spreadsheet columns:
+  `trust_score, trust_band, title, company, job_type, location, salary, posted_date, summary, source, url`.
 
 ## Files
 
@@ -74,12 +92,17 @@ n8n-job-scraper/
 ├── workflow.json                 # ← import THIS into n8n
 ├── README.md                     # this file
 ├── src/
-│   ├── normalize-core.js         # pure transform logic (single source of truth)
-│   ├── normalize-jobs.js         # the Code-node body (core inlined + n8n glue)
+│   ├── normalize-core.js         # pure transform + Trust score (single source of truth)
+│   ├── normalize-jobs.js         # "Compile Jobs" Code-node body (core inlined + n8n glue)
+│   ├── prep-summaries.js         # "Prep Summaries": batch rows into one Gemini request
+│   ├── apply-summaries.js        # "Apply Summaries": attach one-liners (snippet fallback)
+│   ├── build-report.js           # "Build Report": chart URL + HTML email + styled .xls + chart PNG
 │   └── test-normalize.js         # offline test: live APIs → transform
 ├── scripts/
 │   ├── build-workflow.js         # regenerates workflow.json from the node defs
-│   └── test-workflow-code.js     # runs the embedded Code node against live data
+│   ├── test-workflow-code.js     # runs the embedded Compile Jobs body against live data
+│   ├── test-report.js            # runs Prep→[Gemini mock]→Apply→Build offline; writes previews
+│   └── make-preview.js           # inlines images into the email preview for viewing
 └── workflows/
     └── weekly_ai_automation_jobs.md   # WAT-style SOP
 ```
@@ -94,11 +117,16 @@ n8n-job-scraper/
    → *Pricing → Basic (Free) → Subscribe*. Then *Credentials → New → "Header Auth"* with
    **Name** = `X-RapidAPI-Key` and **Value** = your key, and select it on the **JSearch** node.
    (The endpoint is `/search-v2`; the deprecated `/search` returns `404 Endpoint '/search' does not exist`.)
+3c. **Add the Gemini key (free, no card).** Create a key at
+   [Google AI Studio](https://aistudio.google.com/apikey). Then *Credentials → New → "Header Auth"*
+   with **Name** = `x-goog-api-key` and **Value** = your key, and select it on the **Gemini** node.
+   The free tier is far more than enough (one batched request per run). If Gemini is unreachable the
+   run still completes — summaries fall back to a description snippet.
 4. **Sanity-check two fields on `Email Report`** (n8n versions differ slightly, so confirm
    after import — see [Version notes](#version-notes)):
    - *Email Type* = **HTML**.
-   - Under *Options → Attachments*, one attachment with binary property **`data`**
-     (that is the property `To XLSX` writes the Excel file to).
+   - Under *Options → Attachments*, **two** attachments with binary properties **`data`**
+     (the `.xls`) and **`chart`** (the `.png`) — both produced by the `Build Report` node.
 5. **Test run.** Open the workflow and click **Execute Workflow**. You should get an email
    within a minute — either the report with the `.xlsx` attached, or the "no matches" note.
 6. **Activate.** Toggle the workflow **Active** so the Mon & Thu 08:00 schedule runs it automatically.

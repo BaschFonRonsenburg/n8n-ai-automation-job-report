@@ -9,24 +9,18 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const jsCode = fs.readFileSync(path.join(ROOT, 'src', 'normalize-jobs.js'), 'utf8');
+const readSrc = (f) => fs.readFileSync(path.join(ROOT, 'src', f), 'utf8');
+const jsCode = readSrc('normalize-jobs.js');
+const prepSummariesCode = readSrc('prep-summaries.js');
+const applySummariesCode = readSrc('apply-summaries.js');
+const buildReportCode = readSrc('build-report.js');
 
 // Placeholder recipient for the public template — set your own address in the Config node's
 // `recipient` field after import (both Gmail nodes read it from there).
 const RECIPIENT = 'you@example.com';
 
-// HTML body for the report email, built from the Compile Jobs node's items.
-const reportBody =
-  "=<h2>Weekly AI Automation — Part-Time / Contract / Freelance</h2>" +
-  "<p>{{ $('Compile Jobs').all().length }} matching remote role(s) this week " +
-  "(part-time, contract or freelance; automation / AI focus).</p>" +
-  "<p>Full list attached as an Excel file. Top roles:</p><ul>" +
-  "{{ $('Compile Jobs').all().slice(0, 10)" +
-  ".map(i => `<li><a href=\"${i.json.url}\">${i.json.title}</a> — ${i.json.company} " +
-  "<em>(${i.json.job_type}, ${i.json.location})</em></li>`).join('') }}" +
-  "</ul><p style=\"color:#888;font-size:12px\">Sources: Remotive, Jobicy + JSearch " +
-  "(Indeed / LinkedIn / Glassdoor / ZipRecruiter via Google for Jobs). " +
-  "Generated automatically by n8n.</p>";
+// The report email's subject + HTML body are produced by the "Build Report" Code node
+// (see src/build-report.js) and read via {{ $json.subject }} / {{ $json.html }}.
 
 const noResultsBody =
   "=<h2>Weekly AI Automation — Part-Time Jobs</h2>" +
@@ -212,30 +206,74 @@ const nodes = [
     },
   },
   {
-    id: 'node-xlsx',
-    name: 'To XLSX',
-    type: 'n8n-nodes-base.convertToFile',
-    typeVersion: 1.1,
-    position: [1140, 440],
+    // Collapse the N job items into ONE item so the Gemini call is a single batched request.
+    id: 'node-prep',
+    name: 'Prep Summaries',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position: [1120, 440],
+    parameters: { mode: 'runOnceForAllItems', jsCode: prepSummariesCode },
+  },
+  {
+    // Google Gemini (free tier). Needs a "Header Auth" credential named x-goog-api-key holding
+    // the AI Studio key (create at https://aistudio.google.com/apikey). One call per run.
+    id: 'node-gemini',
+    name: 'Gemini',
+    type: 'n8n-nodes-base.httpRequest',
+    typeVersion: 4.2,
+    position: [1320, 440],
     parameters: {
-      operation: 'xlsx',
-      options: { fileName: 'ai-automation-part-time-jobs.xlsx', sheetName: 'Jobs' },
+      method: 'POST',
+      url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+      authentication: 'genericCredentialType',
+      genericAuthType: 'httpHeaderAuth',
+      sendBody: true,
+      contentType: 'json',
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json.geminiBody) }}',
+      // Force JSON parsing of the reply so Apply Summaries reads a parsed object, not a string.
+      options: { timeout: 30000, response: { response: { responseFormat: 'json' } } },
     },
+    // If Gemini errors/times out, keep going — Apply Summaries falls back to a description snippet.
+    onError: 'continueRegularOutput',
+    retryOnFail: true,
+    maxTries: 2,
+    waitBetweenTries: 3000,
+  },
+  {
+    // Re-expand to one item per job, attaching the one-line summary (or the snippet fallback).
+    id: 'node-apply',
+    name: 'Apply Summaries',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position: [1520, 440],
+    parameters: { mode: 'runOnceForAllItems', jsCode: applySummariesCode },
+  },
+  {
+    // Build the whole deliverable: chart URL + HTML email + styled .xls (binary `data`).
+    id: 'node-report',
+    name: 'Build Report',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position: [1720, 440],
+    parameters: { mode: 'runOnceForAllItems', jsCode: buildReportCode },
   },
   {
     id: 'node-email-report',
     name: 'Email Report',
     type: 'n8n-nodes-base.gmail',
     typeVersion: 2.1,
-    position: [1360, 440],
+    position: [1920, 440],
     parameters: {
       resource: 'message',
       operation: 'send',
       sendTo: "={{ $('Config').first().json.recipient }}",
-      subject: '=' + subjectBase + " ({{ $('Compile Jobs').all().length }} roles)",
+      // Subject + HTML body are built by the Build Report node.
+      subject: '={{ $json.subject }}',
       emailType: 'html',
-      message: reportBody,
-      options: { attachmentsUi: { attachmentsBinary: [{ property: 'data' }] } },
+      message: '={{ $json.html }}',
+      // Two attachments: the styled spreadsheet (`data`) and the Trust chart PNG (`chart`).
+      options: { attachmentsUi: { attachmentsBinary: [{ property: 'data' }, { property: 'chart' }] } },
     },
   },
   {
@@ -289,18 +327,23 @@ const connections = {
   JSearch: { main: [[{ node: 'Merge Sources', type: 'main', index: 2 }]] },
   'Merge Sources': { main: [[{ node: 'Compile Jobs', type: 'main', index: 0 }]] },
   'Compile Jobs': { main: [[{ node: 'Has Results?', type: 'main', index: 0 }]] },
-  // IF output 0 = TRUE (empty) -> no-results email; output 1 = FALSE (has jobs) -> xlsx
+  // IF output 0 = TRUE (empty) -> no-results email; output 1 = FALSE (has jobs) -> report path
   'Has Results?': {
     main: [
       [{ node: 'Email No Results', type: 'main', index: 0 }],
-      // has-jobs branch fans to both the Excel/email path and the Data Table log
+      // has-jobs branch fans to the summarize->report chain AND the Data Table log. The log
+      // hangs off here (not after the LLM) so history is recorded even if Gemini/Build Report fail.
       [
-        { node: 'To XLSX', type: 'main', index: 0 },
+        { node: 'Prep Summaries', type: 'main', index: 0 },
         { node: 'Store in Log', type: 'main', index: 0 },
       ],
     ],
   },
-  'To XLSX': { main: [[{ node: 'Email Report', type: 'main', index: 0 }]] },
+  // Summarize (batched) -> re-expand -> build chart+email+xls -> send.
+  'Prep Summaries': { main: [[{ node: 'Gemini', type: 'main', index: 0 }]] },
+  Gemini: { main: [[{ node: 'Apply Summaries', type: 'main', index: 0 }]] },
+  'Apply Summaries': { main: [[{ node: 'Build Report', type: 'main', index: 0 }]] },
+  'Build Report': { main: [[{ node: 'Email Report', type: 'main', index: 0 }]] },
 };
 
 const workflow = {

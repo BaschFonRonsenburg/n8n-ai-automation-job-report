@@ -16,7 +16,10 @@ None at runtime. Behavior is controlled by the **Config** node:
 - `allowedTypes` (default `part_time,contract,freelance`)
 - `requireKeyword` (default `true`)
 
-Credential required: a **Gmail OAuth2** credential on both Gmail nodes.
+Credentials required:
+- **Gmail OAuth2** on both Gmail nodes (`Email Report`, `Email No Results`).
+- **Header Auth** `X-RapidAPI-Key` on the **JSearch** node.
+- **Header Auth** `x-goog-api-key` on the **Gemini** node (free key from Google AI Studio).
 
 ## Tools / nodes, in order
 1. **Config** (Set) — publishes the search term + filter settings to the two HTTP nodes and
@@ -25,23 +28,35 @@ Credential required: a **Gmail OAuth2** credential on both Gmail nodes.
    Response body: `{ jobs: [...] }`. Respect Remotive's **≤ 4 calls/day** guidance.
 3. **Jobicy** (HTTP) — `GET https://jobicy.com/api/v2/remote-jobs?count=50&tag={{searchTerm}}`.
    Response body: `{ jobs: [...] }`.
-4. **Compile Jobs** (Code, run-once-for-all-items) — maps both sources to a common schema,
+4. **Compile Jobs** (Code, run-once-for-all-items) — maps all sources to a common schema,
    keeps rows whose employment type ∈ `allowedTypes`, applies the automation keyword gate
    (against title + tags + category + description), drops postings older than `maxAgeDays`,
-   dedupes by URL (then title|company), sorts newest-first. Emits **one item per job**, or a
-   single `{ empty: true }` marker when nothing matched. Source of truth: `src/normalize-jobs.js`.
+   dedupes by URL (then title|company), sorts newest-first. Also **retains a cleaned description**
+   and computes a **0–100 Trust score** (+ band + reasons). Emits **one item per job**, or a single
+   `{ empty: true }` marker when nothing matched. Source of truth: `src/normalize-jobs.js`.
 5. **Has Results?** (IF) — `{{ $json.empty }} is true` →
    - **true** output → **Email No Results**
-   - **false** output → **To XLSX**
-6. **To XLSX** (Convert to File) — turns the job items into `ai-automation-part-time-jobs.xlsx`
-   (binary property `data`).
-7. **Email Report** (Gmail) — HTML body (count + top 8 linked roles) with the `.xlsx`
-   attached; subject includes the date and role count.
-8. **Email No Results** (Gmail) — short "nothing matched this week" note.
+   - **false** output → **Prep Summaries** *and* **Store in Log** (log hangs here so history is
+     recorded even if the LLM/report path fails).
+6. **Prep Summaries** (Code) — collapses the N job items into ONE item holding the job array plus a
+   ready-made Gemini request body, so the next node makes a single batched call.
+7. **Gemini** (HTTP, POST `…/models/gemini-2.0-flash:generateContent`) — one call returns a JSON
+   array of one-line summaries. `onError: continueRegularOutput` + retry, response pinned to JSON.
+8. **Apply Summaries** (Code) — re-expands to one item per job, attaching each summary; on any
+   Gemini failure a role falls back to the first sentence of its own description.
+9. **Build Report** (Code) — the whole deliverable in one node: a QuickChart Trust-score image
+   (embedded in the email **and** fetched as `company-trust-chart.png`, binary `chart`), the HTML
+   email body + subject, and a styled Excel-compatible `.xls` (binary `data`). Source: `src/build-report.js`.
+10. **Email Report** (Gmail) — subject/body from `{{ $json.subject }}` / `{{ $json.html }}`, with
+    **two** attachments: binary `data` (the `.xls`) and binary `chart` (the `.png`).
+11. **Email No Results** (Gmail) — short "nothing matched this week" note.
 
 ## Expected outputs
-- **Deliverable:** an email to the user with `ai-automation-part-time-jobs.xlsx` attached,
-  columns `source, title, company, job_type, location, salary, posted_date, url, tags`.
+- **Deliverable:** a designed HTML email (Trust-score chart + per-role cards with AI summaries and
+  Trust badges) with **two attachments** — `ai-automation-jobs.xls` (styled: banner, summary,
+  trust-band legend, colored Trust column, clickable roles) and `company-trust-chart.png`.
+  Spreadsheet columns: `trust_score, trust_band, title, company, job_type, location, salary,
+  posted_date, summary, source, url`.
 - **Quiet week:** a "no matches" email instead. Never a silent run.
 
 ## Edge cases & failure handling
@@ -70,3 +85,21 @@ Credential required: a **Gmail OAuth2** credential on both Gmail nodes.
   Himalayas has no reliable search param. Two good sources beat a flaky third.
 - **A zero-item node stops the branch.** To guarantee the "no results" email fires, the Code
   node emits an `empty` marker item rather than an empty array.
+- **Trust score, not a rating.** No free source returns real employer star-ratings, so the score is
+  a transparent legitimacy signal built from data we already have (salary shown, cross-posting,
+  verified site/logo, direct apply, recency, reputable board). It's fair across sources — the
+  JSearch-only signals are additive bonuses, never penalties, so Remotive/Jobicy rows aren't
+  disadvantaged.
+- **Styled spreadsheet on n8n Cloud.** Cloud blocks external Code-node libraries (exceljs) and the
+  built-in "Convert to File" node can't format cells — so the `.xls` is an HTML table saved with an
+  `.xls` extension, which Excel/Sheets open **with** the styling. It's `.xls` under the hood, not
+  a true `.xlsx`.
+- **One batched LLM call.** `Prep Summaries` collapses all rows into a single item so `Gemini` fires
+  once per run regardless of job count; `Apply Summaries` re-expands. Keeps cost flat and well inside
+  the free tier.
+- **Don't hotlink employer logos.** Some boards (e.g. Remotive) 403 hotlinked logo URLs, which renders
+  as a broken image in email — the cards use a colored initial avatar instead. The QuickChart image is
+  fine to hotlink.
+- **Set the recipient after import.** The template ships with `you@example.com` in the Config node;
+  leaving it unchanged sends the report to that dead placeholder domain and it bounces (Mail Delivery
+  Subsystem / "Address not found"). Set `Config.recipient` to a real address before the first run.

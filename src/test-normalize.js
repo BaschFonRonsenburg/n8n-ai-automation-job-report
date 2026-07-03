@@ -56,6 +56,8 @@ async function getJson(url) {
   for (const r of rows.slice(0, 25)) {
     console.log(`• [${r.source}] ${r.title} — ${r.company} (${r.job_type})`);
     console.log(`    ${r.location} | ${r.posted_date} | ${r.salary || 'salary n/a'}`);
+    console.log(`    Trust ${r.trust_score}/100 (${r.trust_band}) — ${r.trust_reasons}`);
+    console.log(`    desc: ${(r.description || '(none)').slice(0, 120)}`);
     console.log(`    ${r.url}`);
   }
   if (rows.length > 25) console.log(`  ...and ${rows.length - 25} more`);
