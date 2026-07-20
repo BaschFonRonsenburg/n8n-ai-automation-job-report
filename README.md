@@ -10,6 +10,16 @@ sends a "no matches this week" note instead.
 Built as a portfolio piece. To turn it into a client deliverable later, only the
 recipient email needs to change (see [Reuse for a client](#reuse-for-a-client)).
 
+## Preview
+
+![Weekly AI-Automation Jobs email report](docs/preview.svg)
+
+<sub>Illustrative mockup of the delivered HTML email — role cards with per-employer
+Trust badges and the Company Trust-score chart. To use a real capture instead: run
+`node scripts/make-preview.js` (renders the actual email), screenshot it, save it as
+`docs/screenshot.png`, and point the image above at that file. The real Trust-score chart
+is already produced at `.tmp/company-trust-chart.png` on every run.</sub>
+
 ## Deployment status
 
 **Live and running** on **https://YOUR-INSTANCE.app.n8n.cloud** (workflow id
